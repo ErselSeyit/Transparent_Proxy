@@ -1,0 +1,16 @@
+version: '3'
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    ports:
+      - "8080:8080"
+
+  dns:
+    build:
+      context: .
+      dockerfile: Dockerfile.dns
+    ports:
+      - "53:53/udp"
+

@@ -1,0 +1,29 @@
+FROM openjdk:11-jdk-slim
+
+# Install required dependencies
+RUN apt-get update && apt-get install -y \
+    openjfx \
+    wget \
+    unzip \
+    xvfb
+
+# Set environment variables for JavaFX
+ENV JAVAFX_SDK_VERSION=11.0.2
+ENV PATH_TO_FX=/usr/javafx-sdk-${JAVAFX_SDK_VERSION}/lib
+
+# Copy JavaFX SDK
+COPY javafx-sdk-11.0.2 /usr/javafx-sdk-11.0.2
+
+# Set working directory
+WORKDIR /app
+
+# Copy application files
+COPY TransparentProxy.java /app
+COPY ProxyGUI.java /app
+
+# Compile the application
+RUN javac --module-path $PATH_TO_FX --add-modules javafx.controls,javafx.fxml ProxyGUI.java TransparentProxy.java
+
+# Run the application with Xvfb
+CMD ["xvfb-run", "--auto-servernum", "java", "--module-path", "/usr/javafx-sdk-11.0.2/lib", "--add-modules", "javafx.controls", "ProxyGUI"]
+
