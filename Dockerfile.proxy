@@ -1,29 +1,29 @@
+# Use an official OpenJDK runtime as a parent image
 FROM openjdk:11-jdk-slim
 
-# Install required dependencies
+# Install necessary packages
 RUN apt-get update && apt-get install -y \
-    openjfx \
     wget \
     unzip \
-    xvfb
+    xvfb \
+    libgtk-3-0 \
+    libgl1-mesa-glx \
+    libpulse0 \
+    libasound2
 
 # Set environment variables for JavaFX
 ENV JAVAFX_SDK_VERSION=11.0.2
 ENV PATH_TO_FX=/usr/javafx-sdk-${JAVAFX_SDK_VERSION}/lib
 
-# Copy JavaFX SDK
-COPY javafx-sdk-11.0.2 /usr/javafx-sdk-11.0.2
+# Copy the JavaFX SDK from the local machine
+COPY javafx-sdk-11.0.2 /usr/javafx-sdk-${JAVAFX_SDK_VERSION}
 
-# Set working directory
+# Create app directory and copy source code
 WORKDIR /app
+COPY ProxyGUI.java TransparentProxy.java config.properties ./
 
-# Copy application files
-COPY TransparentProxy.java /app
-COPY ProxyGUI.java /app
-
-# Compile the application
+# Compile the Java source code
 RUN javac --module-path $PATH_TO_FX --add-modules javafx.controls,javafx.fxml ProxyGUI.java TransparentProxy.java
 
-# Run the application with Xvfb
-CMD ["xvfb-run", "--auto-servernum", "java", "--module-path", "/usr/javafx-sdk-11.0.2/lib", "--add-modules", "javafx.controls", "ProxyGUI"]
-
+# Command to run the application using Xvfb
+CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24", "java", "--module-path", "/usr/javafx-sdk-11.0.2/lib", "--add-modules", "javafx.controls,javafx.fxml", "ProxyGUI"]

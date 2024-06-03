@@ -26,10 +26,9 @@ public class TransparentProxy {
     private final int httpsPort;
     private final ConcurrentHashMap<String, AtomicInteger> rateLimitMap = new ConcurrentHashMap<>();
     private ConcurrentHashMap<String, CachedResponse> cache = new ConcurrentHashMap<>();
-
-    // In-memory log storage
     private final Map<String, List<String>> clientLogs = new ConcurrentHashMap<>();
     private final Map<String, Boolean> clientFilterStatus = new ConcurrentHashMap<>();
+    private final String LOGIN_PAGE = "<html><body><h1>Login</h1><form method='POST' action='/login'>Token: <input type='text' name='token'><br><input type='submit' value='Submit'></form></body></html>";
 
     public class CachedResponse {
         private String body;
@@ -49,39 +48,23 @@ public class TransparentProxy {
         }
     }
 
-    public class HttpResponse<T> {
-        private int statusCode;
-        private T body;
-        private Map<String, String> headers;
-
-        public HttpResponse(int statusCode, T body, Map<String, String> headers) {
-            this.statusCode = statusCode;
-            this.body = body;
-            this.headers = headers;
-        }
-
-        public int getStatusCode() {
-            return statusCode;
-        }
-
-        public T getBody() {
-            return body;
-        }
-
-        public Map<String, String> getHeaders() {
-            return headers;
-        }
-    }
-
     public TransparentProxy() throws IOException {
         Properties properties = new Properties();
-        properties.load(new FileInputStream("config.properties"));
+        try (FileInputStream fis = new FileInputStream("config.properties")) {
+            properties.load(fis);
+        } catch (FileNotFoundException e) {
+            LOGGER.log(Level.SEVERE, "Configuration file not found", e);
+            throw e;
+        } catch (IOException e) {
+            LOGGER.log(Level.SEVERE, "Error loading configuration file", e);
+            throw e;
+        }
+
         this.threadPoolSize = Integer.parseInt(properties.getProperty("threadPoolSize"));
         this.httpPort = Integer.parseInt(properties.getProperty("httpPort"));
         this.httpsPort = Integer.parseInt(properties.getProperty("httpsPort"));
         serverSocket = new ServerSocket(Integer.parseInt(properties.getProperty("port")));
         executorService = Executors.newFixedThreadPool(threadPoolSize);
-
         validateConfiguration();
     }
 
@@ -138,10 +121,6 @@ public class TransparentProxy {
 
     public List<String> getFilteredHosts() {
         return filterList;
-    }
-
-    public Map<String, Boolean> getClientFilterStatus() {
-        return clientFilterStatus;
     }
 
     private void cacheResponse(String key, HttpResponse<String> response) {
@@ -213,34 +192,45 @@ public class TransparentProxy {
                 sendErrorResponse(clientSocket, 400); // Send a 400 Bad Request error
                 return;
             }
-
+    
             // Log the client's IP address and request
             String clientIp = clientSocket.getInetAddress().getHostAddress();
             LOGGER.log(Level.INFO, "Received request from " + clientIp + ": " + line);
             logRequest(clientIp, line);
-
-            // Check if the client is already authenticated
-            if (!clientFilterStatus.containsKey(clientIp)) {
-                handleLoginRequest(clientSocket, clientIp, line);
-                return;
-            }
-
+    
             // Check rate limit
             rateLimitMap.putIfAbsent(clientIp, new AtomicInteger(0));
             if (rateLimitMap.get(clientIp).incrementAndGet() > 100) { // limit to 100 requests per minute per IP
                 sendErrorResponse(clientSocket, 429); // Send a 429 Too Many Requests error
                 return;
             }
-
+    
             // Parse the request
             String[] parts = line.split(" ");
             String method = parts[0];
             String url = parts[1];
-
-            String host = extractHost(url);
-
+    
+            // Handle login page
+            if (url.equals("/login") && method.equals("POST")) {
+                String requestBody = readRequestBody(reader);
+                LOGGER.log(Level.INFO, "Login request body: " + requestBody); // Log the request body for debugging
+                handleLoginRequest(clientSocket, requestBody, clientIp);
+                return;
+            }
+    
+            // Check if the client is logged in
+            Boolean filterStatus = clientFilterStatus.get(clientIp);
+            LOGGER.log(Level.INFO, "Client filter status for " + clientIp + ": " + filterStatus);
+            if (filterStatus == null) {
+                LOGGER.log(Level.INFO, "Client " + clientIp + " is not logged in. Sending login page.");
+                sendLoginPage(clientSocket);
+                return;
+            }
+    
+            String host = extractHost(line);
+    
             if (method.equals("CONNECT")) {
-                handleHttpsRequest(clientSocket, host, clientIp);
+                handleHttpsRequest(clientSocket, host);
             } else {
                 if (isValidMethod(method)) {
                     HttpResponse<String> cachedResponse = getCachedResponse(url, getLastModified(url));
@@ -257,6 +247,7 @@ public class TransparentProxy {
             }
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Error handling client request", e);
+            sendErrorResponse(clientSocket, 500); // Send a 500 Internal Server Error
         } finally {
             try {
                 clientSocket.close();
@@ -265,49 +256,24 @@ public class TransparentProxy {
             }
         }
     }
-
-    private void handleLoginRequest(Socket clientSocket, String clientIp, String request) {
-        try (PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true)) {
-            out.println("HTTP/1.1 200 OK");
-            out.println("Content-Type: text/html");
-            out.println();
-            out.println("<html><body>");
-            out.println("<h1>Login</h1>");
-            out.println("<form method='POST' action='/login'>");
-            out.println("Token: <input type='text' name='token'><br>");
-            out.println("<input type='submit' value='Submit'>");
-            out.println("</form>");
-            out.println("</body></html>");
-            out.flush();
-
-            BufferedReader reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.startsWith("POST /login")) {
-                    char[] buffer = new char[1024];
-                    reader.read(buffer);
-                    String body = new String(buffer).trim();
-                    String token = body.split("=")[1];
-
-                    if ("8a21bce200".equals(token)) {
-                        clientFilterStatus.put(clientIp, false);
-                    } else if ("51e2cba401".equals(token)) {
-                        clientFilterStatus.put(clientIp, true);
-                    }
-                    break;
-                }
-            }
-        } catch (IOException e) {
-            LOGGER.log(Level.SEVERE, "Error handling login request", e);
-        }
-    }
-
+    
+    
+    
+    
     private void logRequest(String clientIp, String request) {
         // Log the client's IP and the request
         LOGGER.log(Level.INFO, "Request from " + clientIp + ": " + request);
 
         // Store the log entry in the in-memory log storage
         clientLogs.computeIfAbsent(clientIp, k -> new ArrayList<>()).add("Request from " + clientIp + ": " + request);
+    }
+
+    private void sendLoginPage(Socket clientSocket) throws IOException {
+        PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true);
+        out.println("HTTP/1.1 200 OK");
+        out.println("Content-Type: text/html");
+        out.println();
+        out.println(LOGIN_PAGE);
     }
 
     private void sendCachedResponse(Socket clientSocket, HttpResponse<String> cachedResponse) throws IOException {
@@ -334,12 +300,13 @@ public class TransparentProxy {
         return null;
     }
 
-    private void forwardRequest(Socket clientSocket, String host, String request, String clientIp) throws IOException {
+    private void forwardRequest(Socket clientSocket, String host, String request, String clientIp) {
+        LOGGER.log(Level.INFO, "Forwarding request to host: " + host);
         try (Socket serverSocket = new Socket(host, httpPort);
              PrintWriter out = new PrintWriter(serverSocket.getOutputStream(), true);
              BufferedReader in = new BufferedReader(new InputStreamReader(serverSocket.getInputStream()));
              PrintWriter clientOut = new PrintWriter(clientSocket.getOutputStream(), true)) {
-
+            
             logRequest(clientIp, request);
 
             String filteredHost = extractHost(request);
@@ -362,16 +329,19 @@ public class TransparentProxy {
             }
 
             clientOut.println(response);
+        } catch (IOException e) {
+            LOGGER.log(Level.SEVERE, "Error forwarding request to host: " + host, e);
+            sendErrorResponse(clientSocket, 502); // Send a 502 Bad Gateway error
         }
     }
 
-    private void handleHttpsRequest(Socket clientSocket, String host, String clientIp) {
+    private void handleHttpsRequest(Socket clientSocket, String host) {
         try (PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true)) {
             SSLSocketFactory factory;
             try {
                 factory = getSSLSocketFactory();
             } catch (NoSuchAlgorithmException | KeyManagementException e) {
-                e.printStackTrace();
+                LOGGER.log(Level.SEVERE, "Error creating SSLSocketFactory", e);
                 return;
             }
 
@@ -396,6 +366,7 @@ public class TransparentProxy {
             forwardData(clientSocket, sslSocket);
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Error handling HTTPS request", e);
+            sendErrorResponse(clientSocket, 500); // Send a 500 Internal Server Error
         }
     }
 
@@ -429,12 +400,16 @@ public class TransparentProxy {
         }
     }
 
-    private void sendErrorResponse(Socket clientSocket, int statusCode) throws IOException {
-        PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true);
-        out.println("HTTP/1.1 " + statusCode + " " + getStatusText(statusCode));
-        out.println("Content-Type: text/html");
-        out.println();
-        out.println("<h1>" + statusCode + " " + getStatusText(statusCode) + "</h1>");
+    private void sendErrorResponse(Socket clientSocket, int statusCode) {
+        try {
+            PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true);
+            out.println("HTTP/1.1 " + statusCode + " " + getStatusText(statusCode));
+            out.println("Content-Type: text/html");
+            out.println();
+            out.println("<h1>" + statusCode + " " + getStatusText(statusCode) + "</h1>");
+        } catch (IOException e) {
+            LOGGER.log(Level.SEVERE, "Error sending error response", e);
+        }
     }
 
     private String getStatusText(int statusCode) {
@@ -442,6 +417,7 @@ public class TransparentProxy {
             case 401: return "Unauthorized";
             case 405: return "Method Not Allowed";
             case 429: return "Too Many Requests";
+            case 502: return "Bad Gateway";
             default: return "Error";
         }
     }
@@ -462,7 +438,122 @@ public class TransparentProxy {
         }
     }
 
+    private void handleLoginRequest(Socket clientSocket, String requestBody, String clientIp) throws IOException {
+        String token = extractToken(requestBody);
+        boolean filterStatus = false;
+        boolean validToken = true;
+    
+        // Define valid tokens and their corresponding filter status
+        Map<String, Boolean> validTokens = new HashMap<>();
+        validTokens.put("8a21bce200", false); // Example token for no filtering
+        validTokens.put("51e2cba401", true);  // Example token for enabling filtering
+    
+        LOGGER.log(Level.INFO, "Extracted token: " + token); // Log the extracted token for debugging
+    
+        if (validTokens.containsKey(token)) {
+            filterStatus = validTokens.get(token);
+            LOGGER.log(Level.INFO, "Client " + clientIp + " logged in with token " + token + " setting filter status to " + filterStatus);
+            clientFilterStatus.put(clientIp, filterStatus);
+        } else {
+            validToken = false;
+            LOGGER.log(Level.WARNING, "Client " + clientIp + " provided an invalid token " + token);
+        }
+    
+        if (validToken) {
+            sendLoginResponse(clientSocket, true);
+        } else {
+            sendLoginResponse(clientSocket, false);
+        }
+    }
+    
+    private String readRequestBody(BufferedReader reader) throws IOException {
+        StringBuilder requestBody = new StringBuilder();
+        String line;
+        while (reader.ready() && (line = reader.readLine()) != null) {
+            requestBody.append(line).append("\r\n");
+        }
+        LOGGER.log(Level.INFO, "Full request body: " + requestBody.toString().trim());
+        return requestBody.toString().trim();
+    }
+    
+    private static String extractToken(String requestBody) {
+        if (requestBody == null || requestBody.isEmpty()) {
+            LOGGER.log(Level.WARNING, "Empty or null request body");
+            return "";
+        }
+    
+        LOGGER.log(Level.INFO, "Request body before splitting: " + requestBody);
+    
+        String[] parts = requestBody.split("\r\n\r\n");
+        requestBody = parts[parts.length - 1];
+    
+        LOGGER.log(Level.INFO, "Request body after splitting: " + requestBody);
+    
+        String[] pairs = requestBody.split("&");
+        for (String pair : pairs) {
+            String[] keyValue = pair.split("=", 2);
+            if (keyValue.length != 2) {
+                LOGGER.log(Level.WARNING, "Invalid key-value pair: " + pair);
+                continue;
+            }
+    
+            String key = keyValue[0];
+            String value = keyValue[1];
+    
+            LOGGER.log(Level.INFO, "Key: " + key + ", Value: " + value);
+    
+            if (key.equals("token")) {
+                LOGGER.log(Level.INFO, "Found token: " + value);
+                return value;
+            }
+        }
+    
+        LOGGER.log(Level.WARNING, "Token not found in request body");
+        return "";
+    }
+    
+    private void sendLoginResponse(Socket clientSocket, boolean success) throws IOException {
+        PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true);
+        out.println("HTTP/1.1 " + (success ? "200 OK" : "401 Unauthorized"));
+        out.println("Content-Type: text/html");
+        out.println("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+        out.println("Cache-Control: post-check=0, pre-check=0");
+        out.println("Pragma: no-cache");
+        out.println();
+        out.println("<html><body><h1>" + (success ? "Login Successful" : "Login Failed: Invalid Token") + "</h1></body></html>");
+    }
+    
+    
+
+    public Map<String, Boolean> getClientFilterStatus() {
+        return clientFilterStatus;
+    }
+
     private List<String> getClientLogs(String clientIp) {
         return clientLogs.getOrDefault(clientIp, Collections.emptyList());
+    }
+
+    public static class HttpResponse<T> {
+        private int statusCode;
+        private T body;
+        private Map<String, String> headers;
+
+        public HttpResponse(int statusCode, T body, Map<String, String> headers) {
+            this.statusCode = statusCode;
+            this.body = body;
+            this.headers = headers;
+        }
+
+        public int getStatusCode() {
+            return statusCode;
+        }
+
+        public T getBody() {
+            return body;
+        }
+
+        public Map<String, String> getHeaders() {
+            return headers;
+        }
     }
 }
